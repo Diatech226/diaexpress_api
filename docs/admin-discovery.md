@@ -19,10 +19,10 @@
 ## Interfaces Next.js actuelles
 - **Admin (Pages Router)** : pages minces enveloppant les vues partagées.
   - `/` (`pages/index.js`) rend `AdminPage` via `AdminAccess` (guard).【F:apps/diaexpress-admin/pages/index.js†L1-L10】
-  - `/quotes`, `/shipments`, `/pricing`, `/users` etc. réutilisent les écrans du kit partagé (`@diaexpress/shared/pages/*`).【F:apps/diaexpress-admin/pages/quotes.js†L1-L10】【F:apps/diaexpress-admin/pages/shipments.js†L1-L10】【F:apps/diaexpress-admin/pages/pricing.js†L1-L10】
+  - `/quotes`, `/shipments`, `/pricing`, `/users` etc. réutilisent les écrans du kit partagé (`../src/shared/pages/*`).【F:apps/diaexpress-admin/pages/quotes.js†L1-L10】【F:apps/diaexpress-admin/pages/shipments.js†L1-L10】【F:apps/diaexpress-admin/pages/pricing.js†L1-L10】
 - **Client app** : non encore explorée en détail dans ce scan, mais palette/UX à aligner (cf. kit partagé).【F:README.md†L32-L48】
 
-## Kit partagé `@diaexpress/shared`
+## Kit partagé `../src/shared`
 - Composants et pages réutilisables dans `packages/diaexpress-shared/src/pages`, incluant déjà `AdminPage`, `AdminQuotes`, `AdminShipments`, `AdminPricing`, `AdminPackageType`, `AdminSchedules`, etc., basés sur des hooks d’auth admin et des appels API logistiques/diaPay.
   - Exemple : `AdminPage` agrège quotes, shipments et pricing pour le dashboard de base via `fetchAdminQuotes/Shipments/Pricing` et `fetchCurrentUser`.【F:packages/diaexpress-shared/src/pages/AdminPage.js†L1-L90】
   - `AdminShipments` propose filtres (status, destination, provider, transport), pagination locale et actions (mise à jour statut, suppression) en s’appuyant sur `api/logistics`.【F:packages/diaexpress-shared/src/pages/AdminShipments.js†L1-L83】
@@ -33,6 +33,6 @@
 - Les styles admin se limitent à `src/styles/admin.css` et aux composants partagés : pas encore d’alignement explicite avec la palette/tokens de l’app client pour la cohérence DiaExpress.
 
 ## Pistes de couverture future
-- Migrer l’admin vers l’App Router avec layout, sidebar et header globaux, tout en réutilisant `@diaexpress/shared` pour accélérer les pages logistiques existantes.
+- Migrer l’admin vers l’App Router avec layout, sidebar et header globaux, tout en réutilisant `../src/shared` pour accélérer les pages logistiques existantes.
 - Brancher des data providers uniformes (backend logistique + diaPay `/v1/admin` + CMA CGM + endpoints publics) avec filtres/pagination alignés sur les paramètres API.
 - Ajouter les pages manquantes : détails quote/shipment, pricing avancé (dimensionRanges), package types CRUD, CMA CGM sandbox/schedules/tracking, catalogues publics & FX, paiements diaPay (list + détail), jobs de notifications, API keys, utilisateurs diaPay/DiaExpress, adresses, webhooks, health/env-check.
