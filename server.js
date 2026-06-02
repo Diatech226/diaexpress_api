@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const connectDB = require('./config/db');
+const bodyParser = require('body-parser');
 const appConfig = require('./config/appConfig');
 const { seedAdminUser } = require('./services/adminSeeder');
 const errorHandler = require('./middleware/errorHandler');
@@ -13,6 +14,8 @@ const { metrics } = require('./src/shared/observability/metrics');
 const metricsMiddleware = require('./middleware/metrics');
 const { validateStartupConfig } = require('./config/startupValidation');
 const { buildRateLimiter } = require('./middleware/rateLimit');
+
+
 
 const app = express();
 let httpServer = null;
@@ -48,6 +51,8 @@ const corsOptions = corsOrigins.length
 
 app.use(cors(corsOptions));
 app.use(express.json());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 app.use(requestContextMiddleware);
 app.use(metricsMiddleware);
 
