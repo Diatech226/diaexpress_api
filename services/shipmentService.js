@@ -1,70 +1,22 @@
 const Shipment = require('../models/Shipment');
 const Quote = require('../models/Quote');
 const { ApiError } = require('../utils/http');
+const ShipmentAuditLog = require('../models/ShipmentAuditLog');
+const { generateTrackingNumber } = require('./trackingNumberService');
 
-const SHIPMENT_STATUSES = [
-  'draft',
-  'created',
-  'pending_dispatch',
-  'scheduled',
-  'in_transit',
-  'delayed',
-  'at_hub',
-  'out_for_delivery',
-  'delivered',
-  'failed_delivery',
-  'returned',
-  'cancelled',
-];
+const {
+  SHIPMENT_STATUSES,
+  SHIPMENT_TRANSITIONS: ROLE_TRANSITIONS,
+  normalizeShipmentStatus,
+  canTransitionShipment,
+} = require('../src/domain/statuses');
 
 const TERMINAL_STATUSES = new Set(['delivered', 'returned', 'cancelled']);
 
-const ROLE_TRANSITIONS = {
-  admin: {
-    draft: ['created', 'cancelled'],
-    created: ['pending_dispatch', 'scheduled', 'cancelled'],
-    pending_dispatch: ['scheduled', 'in_transit', 'cancelled'],
-    scheduled: ['in_transit', 'delayed', 'cancelled'],
-    in_transit: ['at_hub', 'out_for_delivery', 'delayed', 'delivered', 'failed_delivery', 'cancelled'],
-    delayed: ['scheduled', 'in_transit', 'at_hub', 'out_for_delivery', 'cancelled'],
-    at_hub: ['out_for_delivery', 'in_transit', 'delayed', 'cancelled'],
-    out_for_delivery: ['delivered', 'failed_delivery', 'delayed', 'cancelled'],
-    failed_delivery: ['out_for_delivery', 'returned', 'cancelled'],
-    delivered: [],
-    returned: [],
-    cancelled: [],
-  },
-  operations: {
-    draft: ['created'],
-    created: ['pending_dispatch', 'scheduled'],
-    pending_dispatch: ['scheduled', 'in_transit'],
-    scheduled: ['in_transit', 'delayed'],
-    in_transit: ['at_hub', 'out_for_delivery', 'delayed'],
-    delayed: ['scheduled', 'in_transit', 'at_hub', 'out_for_delivery'],
-    at_hub: ['out_for_delivery', 'in_transit', 'delayed'],
-    out_for_delivery: ['delivered', 'failed_delivery', 'delayed'],
-    failed_delivery: ['out_for_delivery', 'returned'],
-    delivered: [],
-    returned: [],
-    cancelled: [],
-  },
-};
+const ELIGIBLE_QUOTE_STATUSES = new Set(['approved']);
 
-const ELIGIBLE_QUOTE_STATUSES = new Set(['ready_for_shipment', 'approved', 'customer_approved']);
-
-function generateTrackingCode() {
-  const date = new Date();
-  const yyyymmdd = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(
-    date.getDate(),
-  ).padStart(2, '0')}`;
-  const random = Math.random().toString(36).slice(2, 8).toUpperCase();
-  return `SH-${yyyymmdd}-${random}`;
-}
-
-function normalizeShipmentStatus(status) {
-  if (!status) return status;
-  const normalized = String(status).trim().toLowerCase();
-  return normalized === 'booked' ? 'created' : normalized === 'arrived' ? 'at_hub' : normalized;
+async function generateTrackingCode() {
+  return generateTrackingNumber();
 }
 
 function resolveIdentityRole(identity = {}) {
@@ -77,7 +29,7 @@ function resolveIdentityRole(identity = {}) {
 }
 
 function assertShipmentTransition({ currentStatus, nextStatus, identityRole }) {
-  const current = normalizeShipmentStatus(currentStatus || 'draft');
+  const current = normalizeShipmentStatus(currentStatus || 'created');
   const next = normalizeShipmentStatus(nextStatus);
   if (!next || current === next) return;
 
@@ -85,11 +37,8 @@ function assertShipmentTransition({ currentStatus, nextStatus, identityRole }) {
     throw new ApiError(400, 'SHIPMENT_INVALID_STATUS', `Unsupported shipment status: ${next}`);
   }
 
-  const role = identityRole || 'operations';
-  const transitions = ROLE_TRANSITIONS[role] || ROLE_TRANSITIONS.operations;
-  const allowed = transitions[current] || [];
-  if (!allowed.includes(next)) {
-    throw new ApiError(409, 'INVALID_STATUS_TRANSITION', `Invalid transition: ${current} -> ${next}`);
+  if (!canTransitionShipment(current, next)) {
+    throw new ApiError(409, 'INVALID_STATUS_TRANSITION', 'Transition de statut non autorisée');
   }
 }
 
@@ -115,7 +64,7 @@ function applyLifecycleDates(shipment, status, identity) {
   shipment.meta.lastStatusChangedBy = identity?.principalId || shipment.meta.lastStatusChangedBy || null;
   shipment.meta.lastStatusChangedAt = now;
 
-  if (status === 'scheduled') shipment.scheduledAt = shipment.scheduledAt || now;
+  if (status === 'awaiting_pickup') shipment.scheduledAt = shipment.scheduledAt || now;
   if (status === 'in_transit') shipment.dispatchedAt = shipment.dispatchedAt || now;
   if (status === 'delivered') shipment.deliveredAt = shipment.deliveredAt || now;
   if (status === 'cancelled') shipment.cancelledAt = shipment.cancelledAt || now;
@@ -126,26 +75,31 @@ async function createShipmentFromQuote({ quoteId, identity, notes }) {
   const quote = await Quote.findById(quoteId);
   if (!quote) throw new ApiError(404, 'QUOTE_NOT_FOUND', 'Quote introuvable');
 
-  const normalizedQuoteStatus = String(quote.status || '').toLowerCase();
-  if (!ELIGIBLE_QUOTE_STATUSES.has(normalizedQuoteStatus) && quote.deliveryStatus !== 'assigned') {
-    throw new ApiError(409, 'QUOTE_NOT_ELIGIBLE_FOR_SHIPMENT', `Quote status ${quote.status} cannot be converted to shipment`);
+  const { normalizeQuoteStatus } = require('../src/domain/statuses');
+  const normalizedQuoteStatus = normalizeQuoteStatus(quote.status || '');
+  if (!ELIGIBLE_QUOTE_STATUSES.has(normalizedQuoteStatus)) {
+    throw new ApiError(409, 'QUOTE_NOT_ELIGIBLE_FOR_SHIPMENT', 'Quote not eligible for shipment conversion');
   }
 
   const existing = await Shipment.findOne({ quoteId: quote._id });
-  if (existing) return { shipment: existing, quote, created: false };
+  if (existing || quote.shipmentId) throw new ApiError(409, 'QUOTE_ALREADY_CONVERTED', 'Quote already converted to shipment');
 
-  const trackingCode = quote.trackingNumber || generateTrackingCode();
+  const trackingCode = quote.trackingNumber || await generateTrackingCode();
   const previousQuoteStatus = quote.status;
   const now = new Date();
 
-  const shipment = await Shipment.create({
+  let shipment;
+  try {
+    shipment = await Shipment.create({
     quoteId: quote._id,
+    source: quote.source === 'diamarket' ? 'diamarket' : 'manual',
     userId: quote.userId || null,
     principalId: quote.requestedBy || identity.principalId,
     principalLabel: quote.requestedByLabel || identity.label || null,
     provider: quote.provider || 'internal',
     carrier: quote.carrier || 'DiaExpress',
     trackingCode,
+    shipmentReference: trackingCode,
     status: 'created',
     currentLocation: quote.origin || null,
     currentMarketPointId: quote.originMarketPointId || null,
@@ -153,8 +107,27 @@ async function createShipmentFromQuote({ quoteId, identity, notes }) {
     originMarketPointId: quote.originMarketPointId || null,
     destinationMarketPointId: quote.destinationMarketPointId || null,
     transportLineId: quote.transportLineId || null,
-    weight: quote.weight || null,
+    clientSnapshot: { userId: quote.userId || null, email: quote.userEmail || null, requestedBy: quote.requestedBy || null, label: quote.requestedByLabel || null, recipientContactName: quote.recipientContactName || null, recipientContactEmail: quote.recipientContactEmail || null, recipientContactPhone: quote.recipientContactPhone || null, contactPhone: quote.contactPhone || null },
+    originSnapshot: { label: quote.origin, marketPointId: quote.originMarketPointId || null, senderAddressId: quote.senderAddressId || null },
+    destinationSnapshot: { label: quote.destination, marketPointId: quote.destinationMarketPointId || null, recipientAddressId: quote.recipientAddressId || null },
+    transportSnapshot: { transportType: quote.transportType, transportLineId: quote.transportLineId || null, provider: quote.provider || 'internal', carrier: quote.carrier || 'DiaExpress', delay: quote.pricingSnapshot?.delay || quote.pricingSnapshot?.deliveryDelay || null, estimatedDelivery: quote.estimatedDelivery || null },
+    packageSnapshot: { packageTypeId: quote.packageTypeId || null, quantity: quote.quantity || null, unitType: quote.unitType || null, weight: quote.weight || null, weightActual: quote.weightActual ?? quote.weight ?? null, weightVolumetric: quote.weightVolumetric ?? null, billableWeight: quote.billableWeight ?? quote.weight ?? null, dimensions: { length: quote.length || null, width: quote.width || null, height: quote.height || null }, volume: quote.volume || null, declaredValue: quote.declaredValue || null },
+    serviceSnapshot: { services: quote.services || [], pickupOption: quote.pickupOption || 'pickup' },
+    weight: quote.billableWeight || quote.weight || null,
     volume: quote.volume || null,
+    priceAccepted: quote.finalPrice ?? quote.estimatedPrice ?? null,
+    currency: quote.currency || null,
+    weightActual: quote.weightActual ?? quote.weight ?? null,
+    weightVolumetric: quote.weightVolumetric ?? null,
+    billableWeight: quote.billableWeight ?? quote.weight ?? null,
+    routeSnapshot: { origin: quote.origin, destination: quote.destination, transportType: quote.transportType, transportLineId: quote.transportLineId || null },
+    pricingSnapshot: quote.pricingSnapshot || {
+      estimatedPrice: quote.estimatedPrice,
+      finalPrice: quote.finalPrice,
+      currency: quote.currency,
+      pricingAppliedId: quote.pricingAppliedId,
+      breakdown: quote.pricingBreakdown,
+    },
     dimensions: {
       length: quote.length || null,
       width: quote.width || null,
@@ -162,18 +135,29 @@ async function createShipmentFromQuote({ quoteId, identity, notes }) {
     },
     createdAtOperational: now,
     trackingUpdates: [{
-      eventType: 'quote_converted',
+      eventType: 'shipment_created',
       location: quote.origin || null,
       status: 'created',
-      note: 'Shipment créé depuis le devis',
+      note: 'Shipment Created',
       source: 'system',
       actorId: identity?.principalId || null,
       actorLabel: identity?.label || null,
       carrierReference: null,
       timestamp: now,
+    }, {
+      eventType: 'converted_from_quote',
+      location: quote.origin || null,
+      status: 'created',
+      note: 'Converted From Quote',
+      source: 'system',
+      actorId: identity?.principalId || null,
+      actorLabel: identity?.label || null,
+      carrierReference: trackingCode,
+      timestamp: now,
     }],
     meta: {
       ...(quote.meta || {}),
+      source: quote.source === 'diamarket' ? 'diamarket' : 'manual',
       quote: {
         origin: quote.origin,
         destination: quote.destination,
@@ -181,6 +165,16 @@ async function createShipmentFromQuote({ quoteId, identity, notes }) {
         destinationMarketPointId: quote.destinationMarketPointId || null,
         transportLineId: quote.transportLineId || null,
         estimatedPrice: quote.estimatedPrice,
+        finalPrice: quote.finalPrice,
+        currency: quote.currency,
+        userEmail: quote.userEmail || null,
+        recipientContactName: quote.recipientContactName || null,
+        services: quote.services || [],
+        declaredValue: quote.declaredValue || null,
+        weightActual: quote.weightActual ?? quote.weight ?? null,
+        weightVolumetric: quote.weightVolumetric ?? null,
+        billableWeight: quote.billableWeight ?? quote.weight ?? null,
+        pricingSnapshot: quote.pricingSnapshot || null,
       },
       pickupOption: quote.pickupOption || 'pickup',
       senderAddressId: quote.senderAddressId || null,
@@ -197,17 +191,23 @@ async function createShipmentFromQuote({ quoteId, identity, notes }) {
     convertedAt: now,
     convertedBy: identity?.principalId || null,
   });
+  } catch (error) {
+    if (error?.code === 11000) throw new ApiError(409, 'TRACKING_ALREADY_EXISTS', 'Tracking number already exists');
+    throw error;
+  }
 
   quote.shipmentId = shipment._id;
   quote.trackingNumber = trackingCode;
   quote.deliveryStatus = 'assigned';
-  quote.status = 'converted';
+  quote.status = 'converted_to_shipment';
   quote.convertedAt = now;
   quote.reviewHistory = Array.isArray(quote.reviewHistory) ? quote.reviewHistory : [];
+  await ShipmentAuditLog.create({ shipmentId: shipment._id, quoteId: quote._id, userId: identity?.principalId || null, userLabel: identity?.label || null, role: resolveIdentityRole(identity), action: 'conversion', oldValue: { quoteStatus: previousQuoteStatus }, newValue: { shipmentId: shipment._id, trackingCode, status: 'created' }, comment: notes || 'Converted From Quote' }).catch(() => null);
+
   quote.reviewHistory.push({
     action: 'quote_converted_to_shipment',
     fromStatus: previousQuoteStatus,
-    toStatus: 'converted',
+    toStatus: 'converted_to_shipment',
     actorId: identity?.principalId || null,
     actorLabel: identity?.label || null,
     role: resolveIdentityRole(identity),

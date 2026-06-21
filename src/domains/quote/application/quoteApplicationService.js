@@ -6,9 +6,10 @@ const {
   assertValidTransition,
   buildLifecyclePatch,
 } = require('../../../../services/quoteDomainService');
-const { publishDomainEvent } = require('../../../shared/events/domainEventPublisher');
+const { publishDomainEvent } = require('../../../lib/events/domainEventPublisher');
 const { resolveRouteContext } = require('../../network/application/masterDataService');
-const { DOMAIN_EVENT_NAMES } = require('../../../shared/events/domainEventCatalog');
+const { DOMAIN_EVENT_NAMES } = require('../../../lib/events/domainEventCatalog');
+const { getInternalQuote } = require('../../../../services/pricingService');
 
 async function requestQuote({ body, identity }) {
   await syncUserFromIdentity(identity);
@@ -28,6 +29,47 @@ async function requestQuote({ body, identity }) {
   payload.transportLineId = route.transportLineId || payload.transportLineId || null;
   payload.originMarketPointId = route.originMarketPointId || payload.originMarketPointId || null;
   payload.destinationMarketPointId = route.destinationMarketPointId || payload.destinationMarketPointId || null;
+  const estimate = await getInternalQuote({
+    origin: payload.origin,
+    destination: payload.destination,
+    originMarketPointId: payload.originMarketPointId,
+    destinationMarketPointId: payload.destinationMarketPointId,
+    transportType: payload.transportType,
+    weight: payload.weight,
+    volume: payload.volume,
+    dimensions: { length: payload.length, width: payload.width, height: payload.height },
+    packageTypeId: payload.packageTypeId,
+    transportLineId: payload.transportLineId,
+    additionalServices: body.additionalServices || body.services,
+    currency: payload.currency,
+  });
+  if (!estimate || estimate.errorCode) {
+    const error = new Error('Pricing rule not found');
+    error.status = estimate?.errorCode === 'PRICING_AMBIGUOUS' ? 409 : 404;
+    error.code = estimate?.errorCode || 'PRICING_NOT_FOUND';
+    error.details = estimate?.explanation || null;
+    throw error;
+  }
+  payload.estimatedPrice = estimate.estimatedPrice;
+  payload.currency = estimate.currency;
+  payload.estimationMethod = estimate.appliedRule?.scopeType || 'pricing_engine';
+  payload.pricingBreakdown = estimate.breakdown;
+  payload.pricingAppliedId = estimate.appliedRule?.pricingId || payload.pricingAppliedId;
+  payload.matchedPricingId = estimate.appliedRule?.pricingId || payload.matchedPricingId;
+  payload.pricingSnapshot = {
+    capturedAt: new Date(),
+    provider: estimate.provider || 'internal',
+    estimatedPrice: estimate.estimatedPrice,
+    currency: estimate.currency,
+    route: estimate.appliedRule?.route || { origin: payload.origin, destination: payload.destination },
+    transportType: payload.transportType,
+    appliedRule: estimate.appliedRule,
+    breakdown: estimate.breakdown,
+  };
+  payload.weightActual = estimate.breakdown?.weightActual;
+  payload.weightVolumetric = estimate.breakdown?.weightVolumetric;
+  payload.billableWeight = estimate.breakdown?.billableWeight;
+
   const missing = ['origin', 'destination', 'transportType'].filter((k) => !payload[k]);
   if (missing.length || payload.estimatedPrice == null) {
     const error = new Error('Missing required quote fields');
@@ -46,11 +88,11 @@ async function requestQuote({ body, identity }) {
     requestedBy: identity.principalId,
     requestedByType: identity.type || 'user',
     requestedByLabel: identity.label || null,
-    status: 'requested',
+    status: 'submitted',
     submittedAt: now,
     reviewHistory: [{
       action: 'created',
-      toStatus: 'requested',
+      toStatus: 'submitted',
       actorId: identity.principalId,
       actorLabel: identity.label || null,
       role: identity.type || 'user',

@@ -1,19 +1,5 @@
 const mongoose = require('mongoose');
-
-const SHIPMENT_STATUSES = [
-  'draft',
-  'created',
-  'pending_dispatch',
-  'scheduled',
-  'in_transit',
-  'delayed',
-  'at_hub',
-  'out_for_delivery',
-  'delivered',
-  'failed_delivery',
-  'returned',
-  'cancelled',
-];
+const { SHIPMENT_STATUSES, normalizeShipmentStatus } = require('../src/domain/statuses');
 
 const ShipmentHistorySchema = new mongoose.Schema({
   eventType: { type: String, default: 'status_update' },
@@ -33,6 +19,7 @@ const ShipmentHistorySchema = new mongoose.Schema({
 
 const ShipmentSchema = new mongoose.Schema({
   quoteId: { type: mongoose.Schema.Types.ObjectId, ref: 'Quote', required: true, index: true },
+  source: { type: String, enum: ['manual', 'diamarket'], default: 'manual', index: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   principalId: { type: String, index: true },
   principalLabel: { type: String },
@@ -46,7 +33,7 @@ const ShipmentSchema = new mongoose.Schema({
   status: {
     type: String,
     enum: SHIPMENT_STATUSES,
-    default: 'draft',
+    default: 'created',
   },
   currentLocation: { type: String },
   currentMarketPointId: { type: mongoose.Schema.Types.ObjectId, ref: 'MarketPoint', default: null },
@@ -55,8 +42,23 @@ const ShipmentSchema = new mongoose.Schema({
   destinationMarketPointId: { type: mongoose.Schema.Types.ObjectId, ref: 'MarketPoint', default: null },
   transportLineId: { type: mongoose.Schema.Types.ObjectId, ref: 'TransportLine', default: null },
 
+  clientSnapshot: { type: mongoose.Schema.Types.Mixed },
+  originSnapshot: { type: mongoose.Schema.Types.Mixed },
+  destinationSnapshot: { type: mongoose.Schema.Types.Mixed },
+  transportSnapshot: { type: mongoose.Schema.Types.Mixed },
+  packageSnapshot: { type: mongoose.Schema.Types.Mixed },
+  serviceSnapshot: { type: mongoose.Schema.Types.Mixed },
+  documentSnapshot: { type: mongoose.Schema.Types.Mixed },
+  shipmentReference: { type: String, index: true },
   weight: Number,
   volume: Number,
+  priceAccepted: Number,
+  currency: String,
+  weightActual: Number,
+  weightVolumetric: Number,
+  billableWeight: Number,
+  routeSnapshot: { type: mongoose.Schema.Types.Mixed },
+  pricingSnapshot: { type: mongoose.Schema.Types.Mixed },
   dimensions: {
     length: Number,
     width: Number,
@@ -64,6 +66,19 @@ const ShipmentSchema = new mongoose.Schema({
   },
 
   trackingUpdates: { type: [ShipmentHistorySchema], default: [] },
+
+  assignedAgent: { type: String, default: null, index: true },
+  assignedTeam: { type: String, default: null, index: true },
+  assignedHub: { type: String, default: null, index: true },
+  sla: {
+    deadline: { type: Date, default: null },
+    status: { type: String, enum: ['on_time', 'at_risk', 'late'], default: 'on_time' },
+    rule: { type: String, default: null },
+  },
+  operationsAlerts: { type: [String], default: [] },
+  returnReason: { type: String, default: null },
+  returnComment: { type: String, default: null },
+  returnCustomerVisible: { type: Boolean, default: false },
 
   createdAtOperational: { type: Date },
   scheduledAt: { type: Date },
@@ -85,6 +100,18 @@ const ShipmentSchema = new mongoose.Schema({
   assignedBy: { type: String, default: null },
 }, {
   timestamps: true,
+});
+
+ShipmentSchema.index({ status: 1, createdAt: -1 });
+
+ShipmentSchema.pre('validate', function normalizeShipmentStatusBeforeValidate(next) {
+  if (this.status) this.status = normalizeShipmentStatus(this.status);
+  if (Array.isArray(this.trackingUpdates)) {
+    this.trackingUpdates.forEach((entry) => {
+      if (entry.status) entry.status = normalizeShipmentStatus(entry.status);
+    });
+  }
+  next();
 });
 
 module.exports = mongoose.models.Shipment || mongoose.model('Shipment', ShipmentSchema);

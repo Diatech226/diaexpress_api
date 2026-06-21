@@ -11,7 +11,7 @@ const {
 } = require('../services/quoteDomainService');
 const { requestQuote, transitionQuoteStatus } = require('../src/domains/quote/application/quoteApplicationService');
 const { getMasterDataSummary, resolveRouteContext, listMarketPoints } = require('../src/domains/network/application/masterDataService');
-const { logger } = require('../src/shared/observability/logger');
+const { logger } = require('../src/lib/observability/logger');
 
 const resolveIdentity = (req) => req.identity || ensureRequestIdentity(req);
 
@@ -169,7 +169,7 @@ exports.payQuote = async (req, res, next) => {
 
     await transitionQuoteStatus({
       quote,
-      requestedStatus: 'customer_approved',
+      requestedStatus: 'approved',
       identity,
       note: 'Customer approved quote after payment',
       metadata: { source: 'payment' },
@@ -183,15 +183,17 @@ exports.payQuote = async (req, res, next) => {
 
 exports.estimateQuote = async (req, res, next) => {
   try {
-    const { origin, destination, originMarketPointId, destinationMarketPointId, transportType, weight, volume, length, width, height, packageTypeId, transportLineId } = req.body || {};
-    const route = await resolveRouteContext({
-      origin,
-      destination,
-      originMarketPointId,
-      destinationMarketPointId,
-      transportType,
-      transportLineId,
-    });
+    const { origin, destination, originMarketPointId, destinationMarketPointId, transportType, weight, volume, length, width, height, packageTypeId, transportLineId, additionalServices, services, currency } = req.body || {};
+    const route = (!originMarketPointId && !destinationMarketPointId && !transportLineId && origin && destination && transportType)
+      ? { origin, destination, transportType, originMarketPointId: null, destinationMarketPointId: null, transportLineId: null }
+      : await resolveRouteContext({
+        origin,
+        destination,
+        originMarketPointId,
+        destinationMarketPointId,
+        transportType,
+        transportLineId,
+      });
 
     const resolvedOrigin = route.origin;
     const resolvedDestination = route.destination;
@@ -219,6 +221,8 @@ exports.estimateQuote = async (req, res, next) => {
       dimensions: { length, width, height },
       packageTypeId,
       transportLineId: resolvedTransportLineId,
+      additionalServices: additionalServices || services,
+      currency,
     });
     if (!internalQuote || internalQuote.errorCode) {
       if (internalQuote?.errorCode === 'PRICING_AMBIGUOUS') {
@@ -233,6 +237,11 @@ exports.estimateQuote = async (req, res, next) => {
       estimateType: 'temporary_pricing',
       expiresInSeconds: 1800,
       totalPrice: internalQuote.estimatedPrice,
+      estimatedPrice: internalQuote.estimatedPrice,
+      estimatedDays: internalQuote.estimatedDays,
+      weightActual: internalQuote.breakdown?.weightActual ?? null,
+      weightVolumetric: internalQuote.breakdown?.weightVolumetric ?? null,
+      billableWeight: internalQuote.breakdown?.billableWeight ?? null,
       currency: internalQuote.currency,
       appliedRule: internalQuote.appliedRule,
       breakdown: internalQuote.breakdown,
@@ -383,4 +392,4 @@ const adminStatusUpdate = (status, legacyStatus) => async (req, res, next) => {
 
 exports.confirmQuote = adminStatusUpdate('approved', 'confirmed');
 exports.rejectQuote = adminStatusUpdate('rejected', 'rejected');
-exports.dispatchQuote = adminStatusUpdate('ready_for_shipment', 'dispatched');
+exports.dispatchQuote = adminStatusUpdate('approved', 'approved');

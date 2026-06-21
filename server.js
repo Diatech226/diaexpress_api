@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const connectDB = require('./config/db');
-
 const appConfig = require('./config/appConfig');
 const { seedAdminUser } = require('./services/adminSeeder');
 const errorHandler = require('./middleware/errorHandler');
@@ -9,13 +8,11 @@ const { error } = require('./utils/http');
 const { getAuthRuntimeStatus } = require('./services/diaexpressAuthService');
 const { DOMAIN_REGISTRY } = require('./src/domains');
 const requestContextMiddleware = require('./middleware/requestContext');
-const { logger } = require('./src/shared/observability/logger');
-const { metrics } = require('./src/shared/observability/metrics');
+const { logger } = require('./src/lib/observability/logger');
+const { metrics } = require('./src/lib/observability/metrics');
 const metricsMiddleware = require('./middleware/metrics');
 const { validateStartupConfig } = require('./config/startupValidation');
 const { buildRateLimiter } = require('./middleware/rateLimit');
-
-
 
 const app = express();
 let httpServer = null;
@@ -51,7 +48,6 @@ const corsOptions = corsOrigins.length
 
 app.use(cors(corsOptions));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 app.use(requestContextMiddleware);
 app.use(metricsMiddleware);
 
@@ -185,21 +181,27 @@ const requireMongoConnection = (req, res, next) => {
 app.use(requireMongoConnection);
 
 // Routes
+app.use('/api', require('./routes/cms'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/user'));
 app.use('/api/quotes', require('./routes/quotes'));
+app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/shipments', require('./routes/shipments'));
 app.use('/api/bookings', require('./routes/bookings'));
 app.use('/api/tracking', require('./routes/tracking'));
 app.use('/api/pricing', require('./routes/pricing'));
+app.use('/api/integrations/diamarket', require('./routes/diamarketIntegration'));
 app.use('/api/package-types', require('./routes/packageType'));
 app.use('/api/expeditions', require('./routes/expeditions'));
+app.use('/api/admin/notifications', require('./routes/adminNotifications'));
 app.use('/api/admin/quotes', require('./routes/adminQuotes'));
+app.use('/api/admin/shipments', require('./routes/shipments'));
 app.use('/api/admin/market-points', require('./routes/marketPoints'));
 app.use('/api/payments', require('./routes/payments'));
 app.use('/api/addresses', require('./routes/addresses'));
 app.use('/api/reservations', require('./routes/reservations'));
 app.use('/api/schedules', require('./routes/Schedules'));
+app.use('/api/admin/operations', require('./routes/operationsIncidents'));
 app.use('/api/admin', require('./routes/logisticsAdmin'));
 const adminRouter = require('./routes/v1/admin');
 
